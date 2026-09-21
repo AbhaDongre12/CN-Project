@@ -3,13 +3,15 @@
 #include "ReceiverStateTable.h"
 #include "WarningManager.h"
 #include "ReceiverCommunication.h"
+#include "PriorityManager.h"
 
 ReceiverStateTable stateTable;
 WarningManager warningManager;
-
+PriorityManager priorityManager;
 ReceiverCommunication receiver(
     stateTable,
-    warningManager);
+    warningManager,
+    priorityManager);
 
 void showObject(uint8_t vehicleID, uint8_t objectID)
 {

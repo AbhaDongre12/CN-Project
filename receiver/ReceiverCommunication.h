@@ -4,13 +4,15 @@
 #include "ReceiverProtocol.h"
 #include "ReceiverStateTable.h"
 #include "WarningManager.h"
+#include "PriorityManager.h"
 
 class ReceiverCommunication
 {
 public:
     ReceiverCommunication(
         ReceiverStateTable &stateTable,
-        WarningManager &warningManager);
+        WarningManager &warningManager,
+        PriorityManager &priorityManager);
 
     bool begin();
 
@@ -20,6 +22,7 @@ public:
 private:
     ReceiverStateTable &stateTable;
     WarningManager &warningManager;
+    PriorityManager &priorityManager;
 
     void handleMessage(
         const BlindLinkMessage &message);

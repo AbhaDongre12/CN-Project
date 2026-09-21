@@ -4,6 +4,7 @@
 #include "../receiver/ReceiverStateTable.h"
 #include "../receiver/WarningManager.h"
 #include "../receiver/PriorityManager.h"
+#include "../receiver/ReceiverCommunication.h"
 
 void printWarningLevel(WarningLevel level)
 {
@@ -356,6 +357,64 @@ int main()
         emptyPriorityManager.getHighestPriorityLevel(
             emptyTable,
             emptyWarningManager));
+
+    std::cout << "\n\n";
+
+    std::cout << "[TEST 13] Receiver Communication Integration\n";
+
+    ReceiverStateTable integrationTable;
+    WarningManager integrationWarning;
+    PriorityManager integrationPriority;
+
+    ReceiverCommunication communication(
+        integrationTable,
+        integrationWarning,
+        integrationPriority);
+
+    communication.begin();
+
+    BlindLinkMessage integrationMessage{};
+    integrationMessage.type = MESSAGE_FULL;
+    integrationMessage.vehicle_id = 5;
+    integrationMessage.object_id = 1;
+    integrationMessage.changed_fields = 0;
+    integrationMessage.distance_cm = 80;
+    integrationMessage.zone = ZONE_LEFT;
+    integrationMessage.sequence_number = 1;
+
+    communication.processMessage(integrationMessage);
+
+    NeighborObject *integrationObject =
+        integrationTable.findObject(5, 1);
+
+    std::cout << "Object received: "
+              << (integrationObject != nullptr ? "YES" : "NO")
+              << "\n";
+
+    std::cout << "Warning: ";
+
+    printWarningLevel(
+        integrationWarning.evaluateAll(integrationTable));
+
+    std::cout << "\n";
+
+    NeighborObject *integrationPriorityObject =
+        integrationPriority.getHighestPriorityObject(
+            integrationTable,
+            integrationWarning);
+
+    std::cout << "Priority object: ";
+
+    if (integrationPriorityObject != nullptr)
+    {
+        std::cout
+            << static_cast<int>(
+                   integrationPriorityObject->object_id);
+    }
+    else
+    {
+        std::cout << "NONE";
+    }
 
     std::cout << "\n\n";
     // ==================================================
