@@ -1,46 +1,93 @@
+
 #include <Arduino.h>
+#include "CommunicationManager.h"
+#include "ChangeDetector.h"
 #include "StateTable.h"
 
-void testStateTable();
+CommunicationManager communicationManager;
+StateTable stateTable;
+ChangeDetector changeDetector(10);
+MessageComposer messageComposer(1);
+
+unsigned long lastSampleTime=0;
+uint8_t sampleIndex=0;
+
+const uint16_t simulatedDistances[]={200,180,150,145,120,100};
+const uint8_t sampleCount=sizeof(simulatedDistances)/sizeof(simulatedDistances[0]);
 
 void setup(){
     Serial.begin(115200);
     delay(1000);
-    testStateTable();
+
+    Serial.println("BlindLink Sender Starting...");
+
+    stateTable.initialize();
+
+    if(!communicationManager.begin(1)){
+        Serial.println("ESP-NOW initialization failed!");
+        return;
+    }
+
+    Serial.println("ESP-NOW initialized successfully.");
+    communicationManager.displayMacAddress();
+    Serial.println("Starting simulated object readings...");
 }
 
 void loop(){
-}
+    unsigned long now=millis();
 
-void testStateTable(){
-    StateTable stateTable;
+    if(now-lastSampleTime<2000){
+        return;
+    }
 
-    TrackedObject object1={1,250,ZONE_LEFT};
-    TrackedObject object2={2,400,ZONE_RIGHT};
+    lastSampleTime=now;
 
-    Serial.println("Adding objects...");
+    if(sampleIndex>=sampleCount){
+        Serial.println("Simulation complete.");
+        while(true){
+            delay(1000);
+        }
+    }
 
-    stateTable.addObject(object1);
-    stateTable.addObject(object2);
+    TrackedObject object;
+    object.object_id=1;
+    object.distance_cm=simulatedDistances[sampleIndex];
+    object.zone=ZONE_LEFT;
 
-    stateTable.display();
+    ChangeResult result=changeDetector.detectChange(object,stateTable);
 
-    Serial.println("Finding Object 1...");
+    Serial.print("Simulated distance: ");
+    Serial.print(object.distance_cm);
+    Serial.println(" cm");
 
-    int index=stateTable.findObject(1);
-    Serial.print("Index: ");
-    Serial.println(index);
+    if(result.type==NEW_OBJECT||result.type==CHANGED_OBJECT){
+        BlindLinkMessage message={};
+        message=messageComposer.compose(result);
 
-    Serial.println("Updating Object 1...");
+        Serial.print("Message type: ");
+        Serial.println(message.type);
 
-    TrackedObject updatedObject1={1,200,ZONE_LEFT};
-    stateTable.updateObject(updatedObject1);
+        Serial.print("Object ID: ");
+        Serial.println(message.object_id);
 
-    stateTable.display();
+        Serial.print("Sequence number: ");
+        Serial.println(message.sequence_number);
 
-    Serial.println("Removing Object 2...");
+        Serial.print("Distance: ");
+        Serial.print(message.distance_cm);
+        Serial.println(" cm");
 
-    stateTable.removeObject(2);
+        if(communicationManager.sendMessage(message)){
+            Serial.println("Message submitted to ESP-NOW.");
+        }else{
+            Serial.println("Message was not submitted.");
+        }       
 
-    stateTable.display();
+        stateTable.addObject(object);
+        stateTable.updateConfirmedState(object.object_id,object);
+    }else{
+        Serial.println("No significant change detected.");
+    }
+
+    sampleIndex++;
 }
