@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <Arduino.h>
@@ -25,4 +26,13 @@ struct BlindLinkMessage
     Zone zone;
 
     uint8_t sequence_number;
+};
+
+class ReceiverProtocol
+{
+public:
+    static bool decode(
+        const uint8_t *data,
+        size_t len,
+        BlindLinkMessage *message);
 };
