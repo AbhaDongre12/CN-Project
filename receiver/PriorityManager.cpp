@@ -44,19 +44,25 @@ WarningLevel PriorityManager::getHighestPriorityLevel(
     {
         NeighborObject *object = stateTable.getObjectAt(i);
 
-        if (object == nullptr)
-        {
+        if (object == nullptr || !object->valid)
             continue;
-        }
 
-        WarningLevel level =
-            warningManager.evaluate(*object);
+        WarningLevel level = warningManager.evaluate(*object);
+
+        Serial.printf(
+            "Priority check: vehicle=%u object=%u distance=%u cm level=%d\n",
+            object->vehicle_id,
+            object->object_id,
+            object->distance_cm,
+            static_cast<int>(level));
 
         if (level > highestLevel)
-        {
             highestLevel = level;
-        }
     }
+
+    Serial.printf(
+        "Highest priority warning level=%d\n",
+        static_cast<int>(highestLevel));
 
     return highestLevel;
 }

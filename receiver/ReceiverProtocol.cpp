@@ -11,9 +11,11 @@ namespace
     constexpr uint8_t WIRE_HEARTBEAT = 0x04;
     constexpr uint8_t WIRE_ACK = 0x05;
 
+    // Must match the sender's FIELD_DISTANCE and FIELD_ZONE values.
     constexpr uint8_t FIELD_DISTANCE_MASK = 0x01;
     constexpr uint8_t FIELD_ZONE_MASK = 0x02;
-    constexpr uint8_t VALID_FIELDS_MASK = 0x03;
+    constexpr uint8_t VALID_FIELDS_MASK =
+        FIELD_DISTANCE_MASK | FIELD_ZONE_MASK;
 }
 
 bool ReceiverProtocol::decode(
@@ -21,7 +23,8 @@ bool ReceiverProtocol::decode(
     size_t len,
     BlindLinkMessage *message)
 {
-    if (data == nullptr || message == nullptr || len != PACKET_SIZE)
+    if (data == nullptr || message == nullptr ||
+        len != PACKET_SIZE)
     {
         return false;
     }
@@ -34,7 +37,8 @@ bool ReceiverProtocol::decode(
         return false;
     }
 
-    if (wireType < WIRE_FULL || wireType > WIRE_HEARTBEAT)
+    if (wireType < WIRE_FULL ||
+        wireType > WIRE_HEARTBEAT)
     {
         return false;
     }
@@ -43,19 +47,25 @@ bool ReceiverProtocol::decode(
     const uint8_t objectId = data[2];
     const uint8_t changedFields = data[3];
 
-    if (vehicleId == 0 || objectId == 0)
+    if (vehicleId == 0)
     {
         return false;
     }
 
-    // FULL must contain distance and zone.
+    // HEARTBEAT may use object ID 0.
+    if (wireType != WIRE_HEARTBEAT && objectId == 0)
+    {
+        return false;
+    }
+
+    // FULL must contain both distance and zone.
     if (wireType == WIRE_FULL &&
         changedFields != VALID_FIELDS_MASK)
     {
         return false;
     }
 
-    // DELTA must contain at least one recognized changed field.
+    // DELTA must contain at least one valid changed field.
     if (wireType == WIRE_DELTA &&
         (changedFields == 0 ||
          (changedFields & ~VALID_FIELDS_MASK) != 0))
@@ -63,7 +73,7 @@ bool ReceiverProtocol::decode(
         return false;
     }
 
-    // CLEAR and HEARTBEAT do not use changed-field bits.
+    // CLEAR and HEARTBEAT must not contain change flags.
     if ((wireType == WIRE_CLEAR ||
          wireType == WIRE_HEARTBEAT) &&
         changedFields != 0)
@@ -71,35 +81,39 @@ bool ReceiverProtocol::decode(
         return false;
     }
 
+    // Distance is encoded as little-endian bytes.
     const uint16_t distance =
         static_cast<uint16_t>(data[4]) |
         (static_cast<uint16_t>(data[5]) << 8);
 
     const uint8_t zone = data[6];
 
-    // Validate distance when the message carries it.
-    if (wireType == WIRE_FULL ||
+    const bool carriesDistance =
+        wireType == WIRE_FULL ||
         (wireType == WIRE_DELTA &&
-         (changedFields & FIELD_DISTANCE_MASK)))
+         (changedFields & FIELD_DISTANCE_MASK) != 0);
+
+    const bool carriesZone =
+        wireType == WIRE_FULL ||
+        (wireType == WIRE_DELTA &&
+         (changedFields & FIELD_ZONE_MASK) != 0);
+
+    // Validate only fields carried by this message.
+    if (carriesDistance &&
+        (distance < 10 || distance > 600))
     {
-        if (distance < 10 || distance > 600)
-        {
-            return false;
-        }
+        return false;
     }
 
-    // Validate zone when the message carries it.
-    if (wireType == WIRE_FULL ||
-        (wireType == WIRE_DELTA &&
-         (changedFields & FIELD_ZONE_MASK)))
+    if (carriesZone && zone > 3)
     {
-        if (zone > 3)
-        {
-            return false;
-        }
+        return false;
     }
 
-    message->type = static_cast<MessageType>(wireType - 1);
+    // Wire IDs 1-4 map to enum values 0-3.
+    message->type =
+        static_cast<MessageType>(wireType - 1);
+
     message->vehicle_id = vehicleId;
     message->object_id = objectId;
     message->changed_fields = changedFields;

@@ -178,7 +178,7 @@ bool ReceiverCommunication::decode(
             return false;
 
         if ((message.changed_fields & 0x01U) != 0 &&
-            (message.distance_cm < 10 ||
+            (message.distance_cm < 2 ||
              message.distance_cm > 600))
             return false;
     }
