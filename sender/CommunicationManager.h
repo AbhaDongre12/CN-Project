@@ -16,14 +16,19 @@ public:
     bool sendClear(uint8_t object_id);
     bool sendHeartbeat();
     bool sendAck(uint8_t object_id, uint8_t acknowledged_sequence);
+
     bool sendReliableMessage(
         const BlindLinkMessage &message,
         uint8_t maxRetries = 3,
         unsigned long ackTimeoutMs = 300);
+
     bool hasAck();
     BlindLinkMessage getAck();
     void clearAck();
-    bool isAckFor(uint8_t object_id, uint8_t sequence_number);
+
+    bool isAckFor(
+        uint8_t object_id,
+        uint8_t sequence_number);
 
     void displayMacAddress();
 
@@ -44,6 +49,10 @@ private:
     uint8_t vehicle_id;
     MessageComposer messageComposer;
 
-    volatile bool ack_received;
+    // Protect ACK state shared between the ESP-NOW callback
+    // and the main application task.
+    portMUX_TYPE ackMux = portMUX_INITIALIZER_UNLOCKED;
+
+    bool ack_received;
     BlindLinkMessage received_ack;
 };

@@ -10,13 +10,36 @@ static const uint8_t WIRE_CLEAR = 0x03;
 static const uint8_t WIRE_HEARTBEAT = 0x04;
 static const uint8_t WIRE_ACK = 0x05;
 
+static const char *zoneName(Zone zone)
+{
+    switch (zone)
+    {
+    case ZONE_LEFT:
+        return "LEFT";
+    case ZONE_RIGHT:
+        return "RIGHT";
+    case ZONE_REAR:
+        return "REAR";
+    case ZONE_FRONT:
+        return "FRONT";
+    case ZONE_FRONT_LEFT:
+        return "FRONT_LEFT";
+    case ZONE_FRONT_RIGHT:
+        return "FRONT_RIGHT";
+    case ZONE_REAR_LEFT:
+        return "REAR_LEFT";
+    case ZONE_REAR_RIGHT:
+        return "REAR_RIGHT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 ReceiverCommunication::ReceiverCommunication(
     ReceiverStateTable &stateTable,
     WarningManager &warningManager,
     PriorityManager &priorityManager)
-    : queueRead(0),
-      queueWrite(0),
-      stateTable(stateTable),
+    : stateTable(stateTable),
       warningManager(warningManager),
       priorityManager(priorityManager)
 {
@@ -51,7 +74,7 @@ bool ReceiverCommunication::begin()
     if (!esp_now_is_peer_exist(broadcast))
     {
         esp_now_peer_info_t peerInfo = {};
-        memcpy(peerInfo.peer_addr, broadcast, 6);
+        memcpy(peerInfo.peer_addr, broadcast, sizeof(broadcast));
         peerInfo.channel = 0;
         peerInfo.encrypt = false;
 
@@ -76,10 +99,12 @@ void ReceiverCommunication::onDataRecv(
 {
     (void)mac;
 
-    if (instance != nullptr && data != nullptr)
+    if (instance == nullptr || data == nullptr)
     {
-        instance->enqueue(data, len);
+        return;
     }
+
+    instance->enqueue(data, len);
 }
 
 void ReceiverCommunication::enqueue(
@@ -89,9 +114,6 @@ void ReceiverCommunication::enqueue(
     if (data == nullptr ||
         len != static_cast<int>(PACKET_SIZE))
     {
-        Serial.printf(
-            "Rejected packet length %d (expected 9).\n",
-            len);
         return;
     }
 
@@ -103,7 +125,6 @@ void ReceiverCommunication::enqueue(
     if (next == queueRead)
     {
         portEXIT_CRITICAL(&queueMux);
-        Serial.println("RX queue full; packet dropped.");
         return;
     }
 
@@ -119,7 +140,9 @@ bool ReceiverCommunication::decode(
     BlindLinkMessage &message)
 {
     if (data == nullptr || len != PACKET_SIZE)
+    {
         return false;
+    }
 
     switch (data[0])
     {
@@ -140,9 +163,6 @@ bool ReceiverCommunication::decode(
         break;
 
     default:
-        Serial.printf(
-            "Unknown wire message type 0x%02X.\n",
-            data[0]);
         return false;
     }
 
@@ -150,7 +170,6 @@ bool ReceiverCommunication::decode(
     message.object_id = data[2];
     message.changed_fields = data[3];
 
-    // Distance is little-endian.
     message.distance_cm =
         static_cast<uint16_t>(data[4]) |
         (static_cast<uint16_t>(data[5]) << 8);
@@ -158,29 +177,58 @@ bool ReceiverCommunication::decode(
     message.zone = static_cast<Zone>(data[6]);
     message.sequence_number = data[8];
 
+    if (message.vehicle_id == 0)
+    {
+        return false;
+    }
+
+    if (message.type != MESSAGE_HEARTBEAT &&
+        message.object_id == 0)
+    {
+        return false;
+    }
+
     if (message.type == MESSAGE_FULL ||
         message.type == MESSAGE_DELTA)
     {
         if ((message.changed_fields & ~0x03U) != 0)
+        {
             return false;
+        }
 
         if (message.type == MESSAGE_FULL &&
-            (message.changed_fields & 0x03U) != 0x03U)
+            message.changed_fields != 0x03U)
+        {
             return false;
+        }
 
         if (message.type == MESSAGE_DELTA &&
             message.changed_fields == 0)
+        {
             return false;
+        }
 
-        // Validate only fields actually supplied by the sender.
+        // Values 0-7 are valid zones, including all four corners.
         if ((message.changed_fields & 0x02U) != 0 &&
-            message.zone > ZONE_FRONT)
+            static_cast<uint8_t>(message.zone) > ZONE_REAR_RIGHT)
+        {
             return false;
+        }
 
         if ((message.changed_fields & 0x01U) != 0 &&
             (message.distance_cm < 2 ||
-             message.distance_cm > 600))
+             message.distance_cm > 400))
+        {
             return false;
+        }
+    }
+    else if (message.type == MESSAGE_CLEAR ||
+             message.type == MESSAGE_HEARTBEAT)
+    {
+        if (message.changed_fields != 0)
+        {
+            return false;
+        }
     }
 
     return true;
@@ -207,12 +255,10 @@ void ReceiverCommunication::poll()
 
         portEXIT_CRITICAL(&queueMux);
 
-        // ACK is a response, not a state update.
-        // Handle it directly because MESSAGE_ACK is not in the enum.
         if (packet.bytes[0] == WIRE_ACK)
         {
             Serial.printf(
-                "ACK received: vehicle=%u object=%u seq=%u\n",
+                "ACK observed: vehicle=%u object=%u seq=%u\n",
                 packet.bytes[1],
                 packet.bytes[2],
                 packet.bytes[8]);
@@ -229,31 +275,53 @@ void ReceiverCommunication::poll()
         }
 
         bool accepted = false;
+        bool duplicate = false;
 
         if (message.type == MESSAGE_HEARTBEAT)
         {
             accepted = acceptHeartbeat(message);
 
             if (!accepted)
+            {
                 Serial.println("Duplicate/stale heartbeat rejected.");
+            }
         }
         else
         {
             accepted = stateTable.processMessage(message);
 
             if (accepted)
+            {
                 handleMessage(message);
+            }
+            else if (message.type == MESSAGE_FULL ||
+                     message.type == MESSAGE_DELTA ||
+                     message.type == MESSAGE_CLEAR)
+            {
+                duplicate = stateTable.isDuplicate(
+                    message.vehicle_id,
+                    message.object_id,
+                    message.sequence_number);
+
+                if (duplicate)
+                {
+                    Serial.println(
+                        "Previously processed message; ACKing duplicate.");
+                }
+            }
         }
 
-        if (accepted)
+        // ACK newly processed messages and recognized duplicates.
+        if (accepted || duplicate)
         {
             if (sendAck(message))
             {
                 Serial.printf(
-                    "ACK sent: vehicle=%u object=%u seq=%u\n",
+                    "ACK sent: vehicle=%u object=%u seq=%u%s\n",
                     message.vehicle_id,
                     message.object_id,
-                    message.sequence_number);
+                    message.sequence_number,
+                    duplicate ? " (duplicate)" : "");
             }
             else
             {
@@ -262,8 +330,7 @@ void ReceiverCommunication::poll()
         }
         else
         {
-            Serial.println(
-                "Message rejected; no success ACK sent.");
+            Serial.println("Message rejected; no success ACK sent.");
         }
     }
 
@@ -276,7 +343,7 @@ bool ReceiverCommunication::acceptHeartbeat(
 {
     int freeSlot = -1;
 
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < HEARTBEAT_SLOTS; ++i)
     {
         if (heartbeatSeen[i] &&
             heartbeatVehicleIds[i] == message.vehicle_id)
@@ -286,14 +353,18 @@ bool ReceiverCommunication::acceptHeartbeat(
                 heartbeatSequences[i]);
 
             if (difference == 0 || difference >= 128)
+            {
                 return false;
+            }
 
             heartbeatSequences[i] = message.sequence_number;
             return true;
         }
 
         if (!heartbeatSeen[i] && freeSlot < 0)
+        {
             freeSlot = i;
+        }
     }
 
     if (freeSlot < 0)
@@ -334,9 +405,9 @@ bool ReceiverCommunication::sendWirePacket(
                PACKET_SIZE) == ESP_OK;
 }
 
-void ReceiverCommunication::processMessage(const BlindLinkMessage &message)
+void ReceiverCommunication::processMessage(
+    const BlindLinkMessage &message)
 {
-    // Apply the message to the receiver's state table first.
     bool accepted = stateTable.processMessage(message);
 
     if (!accepted)
@@ -345,14 +416,38 @@ void ReceiverCommunication::processMessage(const BlindLinkMessage &message)
         return;
     }
 
-    // Recalculate warnings and priority after a successful update.
     handleMessage(message);
 }
 
 void ReceiverCommunication::handleMessage(
     const BlindLinkMessage &message)
 {
-    (void)message;
+    if (message.type == MESSAGE_CLEAR)
+    {
+        Serial.println();
+        Serial.println("----- REMOTE OBJECT CLEARED -----");
+        Serial.printf("Vehicle ID: %u\n", message.vehicle_id);
+        Serial.printf("Object ID: %u\n", message.object_id);
+        Serial.println("---------------------------------");
+    }
+    else if (message.type == MESSAGE_FULL ||
+             message.type == MESSAGE_DELTA)
+    {
+        Serial.println();
+        Serial.println("======= REMOTE DETECTION =======");
+        Serial.printf("Vehicle ID: %u\n", message.vehicle_id);
+        Serial.printf("Object ID: %u\n", message.object_id);
+        Serial.printf("Direction: %s\n", zoneName(message.zone));
+
+        if (message.type == MESSAGE_FULL ||
+            (message.changed_fields & 0x01U) != 0)
+        {
+            Serial.printf("Distance: %u cm\n", message.distance_cm);
+        }
+
+        Serial.printf("Sequence: %u\n", message.sequence_number);
+        Serial.println("================================");
+    }
 
     WarningLevel highestWarning =
         warningManager.evaluateAll(stateTable);
@@ -369,6 +464,9 @@ void ReceiverCommunication::handleMessage(
 
         Serial.print("Priority object: ");
         Serial.println(priorityObject->object_id);
+
+        Serial.print("Priority direction: ");
+        Serial.println(zoneName(priorityObject->zone));
 
         Serial.print("Priority warning level: ");
         Serial.println(static_cast<int>(highestWarning));

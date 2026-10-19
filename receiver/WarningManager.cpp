@@ -9,20 +9,22 @@ WarningLevel WarningManager::determineLevel(
     uint16_t distance_cm,
     Zone zone)
 {
-    // TESTING THRESHOLDS
-    if (distance_cm <= 10)
+    /*
+     * Prototype thresholds.
+     *
+     * These are NOT final safety thresholds.
+     * They can be calibrated later using the actual
+     * sensor and project requirements.
+     */
+
+    if (distance_cm <= 100)
     {
         return WARNING_DANGER;
     }
 
-    if (distance_cm <= 20)
+    if (distance_cm <= 200)
     {
         return WARNING_CAUTION;
-    }
-
-    if (distance_cm <= 30)
-    {
-        return WARNING_NONE;
     }
 
     return WARNING_NONE;
@@ -32,18 +34,13 @@ WarningLevel WarningManager::evaluate(
     const NeighborObject &object)
 {
     if (!object.valid)
+    {
         return WARNING_NONE;
+    }
 
-    WarningLevel level = determineLevel(
+    return determineLevel(
         object.distance_cm,
         object.zone);
-
-    Serial.printf(
-        "WARNING DEBUG: distance=%u cm, level=%d\n",
-        object.distance_cm,
-        static_cast<int>(level));
-
-    return level;
 }
 
 WarningLevel WarningManager::evaluateAll(

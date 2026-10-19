@@ -1,5 +1,6 @@
 
 #include "CommunicationManager.h"
+#include <cstring>
 
 CommunicationManager *CommunicationManager::instance = nullptr;
 
@@ -9,15 +10,17 @@ static const uint8_t WIRE_CLEAR = 0x03;
 static const uint8_t WIRE_HEARTBEAT = 0x04;
 static const uint8_t WIRE_ACK = 0x05;
 
-CommunicationManager::CommunicationManager() : messageComposer(0)
+CommunicationManager::CommunicationManager()
+    : ack_received(false),
+      received_ack{},
+      messageComposer(0)
 {
     for (int i = 0; i < 6; i++)
     {
         broadcastAddress[i] = 0xFF;
     }
+
     vehicle_id = 0;
-    ack_received = false;
-    received_ack = {};
 }
 
 bool CommunicationManager::begin(uint8_t id)
@@ -25,12 +28,14 @@ bool CommunicationManager::begin(uint8_t id)
     vehicle_id = id;
     messageComposer = MessageComposer(id);
     instance = this;
-    ack_received = false;
+
+    clearAck();
 
     WiFi.mode(WIFI_STA);
 
     if (esp_now_init() != ESP_OK)
     {
+        Serial.println("ESP-NOW initialization failed.");
         return false;
     }
 
@@ -50,6 +55,7 @@ bool CommunicationManager::begin(uint8_t id)
     {
         if (esp_now_add_peer(&peerInfo) != ESP_OK)
         {
+            Serial.println("Failed to add broadcast peer.");
             return false;
         }
     }
@@ -57,14 +63,22 @@ bool CommunicationManager::begin(uint8_t id)
     return true;
 }
 
-bool CommunicationManager::serializeMessage(const BlindLinkMessage &message, uint8_t *buffer, size_t &length)
+bool CommunicationManager::serializeMessage(
+    const BlindLinkMessage &message,
+    uint8_t *buffer,
+    size_t &length)
 {
+    if (buffer == nullptr)
+    {
+        length = 0;
+        return false;
+    }
+
     for (int i = 0; i < 9; i++)
     {
         buffer[i] = 0;
     }
 
-    buffer[0] = 0;
     buffer[1] = message.vehicle_id;
     buffer[2] = message.object_id;
     buffer[8] = message.sequence_number;
@@ -115,25 +129,28 @@ bool CommunicationManager::serializeMessage(const BlindLinkMessage &message, uin
         return true;
 
     case MESSAGE_SUPPRESS:
+    default:
         length = 0;
         return false;
     }
-
-    length = 0;
-    return false;
 }
 
-bool CommunicationManager::sendMessage(const BlindLinkMessage &message)
+bool CommunicationManager::sendMessage(
+    const BlindLinkMessage &message)
 {
     uint8_t buffer[16] = {};
     size_t length = 0;
 
     if (!serializeMessage(message, buffer, length) || length == 0)
     {
+        Serial.println("Message serialization failed.");
         return false;
     }
 
-    return esp_now_send(broadcastAddress, buffer, length) == ESP_OK;
+    return esp_now_send(
+               broadcastAddress,
+               buffer,
+               length) == ESP_OK;
 }
 
 bool CommunicationManager::sendReliableMessage(
@@ -141,19 +158,21 @@ bool CommunicationManager::sendReliableMessage(
     uint8_t maxRetries,
     unsigned long ackTimeoutMs)
 {
-    // ACKs are meaningful only for messages with a sequence number.
     if (message.type == MESSAGE_ACK ||
         message.type == MESSAGE_SUPPRESS ||
         message.sequence_number == 0)
     {
+        Serial.println("Invalid message for reliable delivery.");
         return false;
     }
 
+    // Clear any stale ACK once, before the first transmission.
+    // Do not clear it on each retry: a delayed ACK for this same
+    // object and sequence is still valid.
+    clearAck();
+
     for (uint8_t attempt = 0; attempt <= maxRetries; attempt++)
     {
-        // Discard any ACK left over from an earlier transmission.
-        clearAck();
-
         Serial.printf(
             "Sending object=%u seq=%u (attempt %u/%u)\n",
             message.object_id,
@@ -192,23 +211,30 @@ bool CommunicationManager::sendReliableMessage(
 
 bool CommunicationManager::sendClear(uint8_t object_id)
 {
-    BlindLinkMessage message = messageComposer.composeClear(object_id);
+    BlindLinkMessage message =
+        messageComposer.composeClear(object_id);
+
     return sendMessage(message);
 }
 
 bool CommunicationManager::sendHeartbeat()
 {
-    BlindLinkMessage message = messageComposer.composeHeartbeat();
+    BlindLinkMessage message =
+        messageComposer.composeHeartbeat();
+
     return sendMessage(message);
 }
 
-bool CommunicationManager::sendAck(uint8_t object_id, uint8_t acknowledged_sequence)
+bool CommunicationManager::sendAck(
+    uint8_t object_id,
+    uint8_t acknowledged_sequence)
 {
     BlindLinkMessage message = {};
     message.type = MESSAGE_ACK;
     message.vehicle_id = vehicle_id;
     message.object_id = object_id;
     message.sequence_number = acknowledged_sequence;
+
     return sendMessage(message);
 }
 
@@ -217,84 +243,112 @@ void CommunicationManager::onDataRecv(
     const uint8_t *data,
     int len)
 {
-    if (instance == nullptr || mac == nullptr ||
-        data == nullptr || len != 9)
+    if (instance == nullptr ||
+        mac == nullptr ||
+        data == nullptr ||
+        len != 9)
     {
         return;
     }
 
+    // Ignore packets that are not ACKs.
     if (data[0] != WIRE_ACK)
     {
         return;
     }
 
-    // ACK must identify this sender's vehicle.
-    if (data[1] != instance->vehicle_id)
+    CommunicationManager *self = instance;
+
+    // The ACK must identify this sender's vehicle.
+    if (data[1] != self->vehicle_id)
     {
+        Serial.printf(
+            "ACK ignored: vehicle mismatch (received=%u expected=%u)\n",
+            data[1],
+            self->vehicle_id);
         return;
     }
 
-    // Ignore ACKs from devices other than our receiver.
-    const uint8_t receiverMac[6] = {
-        0x00, 0x4B, 0x12, 0xEF, 0x47, 0x6C};
+    // Do not filter against a hardcoded receiver MAC.
+    // Record the ACK and let isAckFor() validate the object and sequence.
+    portENTER_CRITICAL(&self->ackMux);
 
-    if (memcmp(mac, receiverMac, 6) != 0)
-    {
-        return;
-    }
+    self->received_ack = {};
+    self->received_ack.type = MESSAGE_ACK;
+    self->received_ack.vehicle_id = data[1];
+    self->received_ack.object_id = data[2];
+    self->received_ack.sequence_number = data[8];
+    self->received_ack.changed_fields = FIELD_NONE;
+    self->received_ack.distance_cm = 0;
+    self->received_ack.zone = ZONE_LEFT;
+    self->ack_received = true;
 
-    instance->received_ack = {};
-    instance->received_ack.type = MESSAGE_ACK;
-    instance->received_ack.vehicle_id = data[1];
-    instance->received_ack.object_id = data[2];
-    instance->received_ack.sequence_number = data[8];
-    instance->received_ack.changed_fields = FIELD_NONE;
-    instance->received_ack.distance_cm = 0;
-    instance->received_ack.zone = ZONE_LEFT;
-
-    instance->ack_received = true;
+    portEXIT_CRITICAL(&self->ackMux);
 
     Serial.printf(
-        "ACK RECEIVED: vehicle=%u object=%u seq=%u\n",
+        "ACK RECEIVED from %02X:%02X:%02X:%02X:%02X:%02X"
+        " | vehicle=%u object=%u seq=%u\n",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         data[1], data[2], data[8]);
 }
 
 bool CommunicationManager::hasAck()
 {
-    return ack_received;
+    portENTER_CRITICAL(&ackMux);
+
+    bool result = ack_received;
+
+    portEXIT_CRITICAL(&ackMux);
+
+    return result;
 }
 
 BlindLinkMessage CommunicationManager::getAck()
 {
+    portENTER_CRITICAL(&ackMux);
+
+    BlindLinkMessage result = received_ack;
+
     ack_received = false;
-    return received_ack;
+    received_ack = {};
+
+    portEXIT_CRITICAL(&ackMux);
+
+    return result;
 }
 
 void CommunicationManager::clearAck()
 {
+    portENTER_CRITICAL(&ackMux);
+
     ack_received = false;
     received_ack = {};
+
+    portEXIT_CRITICAL(&ackMux);
 }
 
 bool CommunicationManager::isAckFor(
     uint8_t object_id,
     uint8_t sequence_number)
 {
-    if (!ack_received)
+    portENTER_CRITICAL(&ackMux);
+
+    bool matched =
+        ack_received &&
+        received_ack.type == MESSAGE_ACK &&
+        received_ack.vehicle_id == vehicle_id &&
+        received_ack.object_id == object_id &&
+        received_ack.sequence_number == sequence_number;
+
+    if (matched)
     {
-        return false;
+        ack_received = false;
+        received_ack = {};
     }
 
-    if (received_ack.type != MESSAGE_ACK ||
-        received_ack.vehicle_id != vehicle_id ||
-        received_ack.object_id != object_id ||
-        received_ack.sequence_number != sequence_number)
-    {
-        return false;
-    }
+    portEXIT_CRITICAL(&ackMux);
 
-    ack_received = false;
-    return true;
+    return matched;
 }
 
 void CommunicationManager::displayMacAddress()

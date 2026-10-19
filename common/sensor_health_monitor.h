@@ -1,9 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
-// HC-SR04-only prototype has one sensor per vehicle, so this monitor reports
-// measurement/link health but does not claim to distinguish an empty scene
-// from a failed sensor with certainty. A timeout can mean no echo OR a fault.
+// Per-sensor health monitor for the HC-SR04 prototype. A timeout can mean
+// either no echo or a sensor/wiring fault; it cannot distinguish these alone.
 enum SensorHealthState : uint8_t {
   SENSOR_HEALTH_OK = 0,
   SENSOR_HEALTH_DEGRADED = 1,

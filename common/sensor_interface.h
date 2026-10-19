@@ -3,7 +3,7 @@
 #include "shared_types.h"
 
 // Person 1: HC-SR04-only interface for the agreed hardware.
-// `valid` means the sensor returned a plausible echo measurement.
+// `valid` means this sensor returned a plausible echo measurement.
 // `object_present` means the measured reflecting surface is inside the
 // configured detection range. HC-SR04 cannot identify the object type.
 struct SensorReading {
@@ -16,10 +16,23 @@ struct SensorReading {
 
 class SensorInterface {
  public:
+  SensorInterface()
+      : trig_(255), echo_(255), zone_(ZONE_LEFT), detection_max_cm_(250) {}
+
   SensorInterface(uint8_t trig_pin, uint8_t echo_pin, Zone covered_zone,
                   uint16_t detection_max_cm = 250)
       : trig_(trig_pin), echo_(echo_pin), zone_(covered_zone),
         detection_max_cm_(detection_max_cm) {}
+
+  void configure(uint8_t trig_pin, uint8_t echo_pin, Zone covered_zone,
+                 uint16_t detection_max_cm = 250) {
+    trig_ = trig_pin;
+    echo_ = echo_pin;
+    zone_ = covered_zone;
+    detection_max_cm_ = detection_max_cm;
+    history_[0] = history_[1] = history_[2] = 0;
+    history_count_ = history_idx_ = 0;
+  }
 
   void begin() {
     pinMode(trig_, OUTPUT);
